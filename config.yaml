@@ -1,7 +1,7 @@
 name:  "myGivTCP"
 description:  "TCP Modbus connection to MQTT/JSON for Givenergy Battery/PV Invertors"
 version:  "3.5.2"
-image: RogueCarbon:dev_giv_tcp
+image: RogueCarbon/dev_giv_tcp
 slug:  "mygivtcp"
 homeassistant_api: true
 hassio_api: true

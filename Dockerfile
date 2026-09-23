@@ -32,6 +32,7 @@ WORKDIR /app
 # copy the dependencies file to the working directory
 COPY requirements.txt .
 RUN pip install -r requirements.txt --no-cache-dir
+RUN pip install --upgrade pip
 
 COPY ingress.conf /etc/nginx/http.d/
 COPY ingress_no_ssl.conf /app/ingress_no_ssl.conf
