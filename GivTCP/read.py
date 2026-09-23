@@ -71,68 +71,97 @@ async def watch_plant(
         timeout: float = 3,
         retries: int = 5,
         passive: bool = False,
-    ):
-        totalTimeoutErrors=0
+):
+    totalTimeoutErrors=0
+    additionCommandIndex=5
+    initialise=True
 
-        """Refresh data about the Plant."""
-        try:
-            client = await GivClientAsync.get_connection(cold_start=True)
-######### Is there a way to just refresh plant here rather than detect again? ##########
-            logger.critical("Detecting inverter characteristics...")
-            await client.detect_plant()
-            await client.refresh_plant(True, number_batteries=client.plant.number_batteries,meter_list=client.plant.meter_list)
-            #await client.close()
-            if client.plant.device_type==Model.GATEWAY:
-                if client.plant.gateway.parallel_aio_num < 2:
-                    logger.critical("Gateway device has a single AIO attached. Consider disabling in config as mostly duplicate data is collected from Gateway")
-            logger.debug ("Running full refresh")
-            if exists("commsfailure_"+str(GiV_Settings.givtcp_instance)+".pkl"):
-                # Remove any failed counts if connection runs OK
-                os.remove("commsfailure_"+str(GiV_Settings.givtcp_instance)+".pkl")
-            if handler:
+    while True:
+
+        if initialise:
+            """Refresh data about the Plant."""
+            try:
+                client = await GivClientAsync.get_connection(cold_start=True)
+                ######### Is there a way to just refresh plant here rather than detect again? ##########
+                logger.critical("Detecting inverter characteristics...")
+                await client.detect_plant()
+                await client.refresh_plant(True, number_batteries=client.plant.number_batteries,meter_list=client.plant.meter_list)
+                #await client.close()
+                if client.plant.device_type==Model.GATEWAY:
+                    if client.plant.gateway.parallel_aio_num < 2:
+                        logger.critical("Gateway device has a single AIO attached. Consider disabling in config as mostly duplicate data is collected from Gateway")
+                logger.debug ("Running full refresh")
+                if exists("commsfailure_"+str(GiV_Settings.givtcp_instance)+".pkl"):
+                    # Remove any failed counts if connection runs OK
+                    os.remove("commsfailure_"+str(GiV_Settings.givtcp_instance)+".pkl")
+                if handler:
+                    try:
+                        handler(client.plant)
+                    except Exception as err:
+                        e=sys.exc_info()[0].__name__, os.path.basename(sys.exc_info()[2].tb_frame.f_code.co_filename), sys.exc_info()[2].tb_lineno
+                        logger.error ("Error in calling handler: "+str(err))
+                if client.connected:
+                    logger.debug("Completed watch_plant initialisation, closing Modbus connection")
+                    await client.close()
+
+            except CommunicationError:
+                logger.error ("Unable to connect to inverter on: "+str(GiV_Settings.invertorIP))
+                failcount=commsFailure()
+                if failcount>=10:
+                    logger.error("Lost communications with Inverter. Restarting container to detect IP change")
+                    rebootaddon()
                 try:
-                    handler(client.plant)
-                except Exception as err:
-                    e=sys.exc_info()[0].__name__, os.path.basename(sys.exc_info()[2].tb_frame.f_code.co_filename), sys.exc_info()[2].tb_lineno
-                    logger.error ("Error in calling handler: "+str(err))
+                    await client.close()
+                except:
+                    pass
+                return
+            except Exception as e:
+                err=sys.exc_info()[0].__name__, os.path.basename(sys.exc_info()[2].tb_frame.f_code.co_filename), sys.exc_info()[2].tb_lineno
+                error_type = e.__class__.__name__    # e.g., "NameError", "AttributeError"
+                error_msg  = str(e)                   # e.g., "name 'some_var' is not defined"
+                # Log or display exactly what you want
+                logger.error("%s: %s", error_type, error_msg)
 
-        except CommunicationError:
-            logger.error ("Unable to connect to inverter on: "+str(GiV_Settings.invertorIP))
-            failcount=commsFailure()
-            if failcount>=10:
-                logger.error("Lost communications with Inverter. Restarting container to detect IP change")
-                rebootaddon()
-            try:
-                await client.close()
-            except:
-                pass
-            return
-        except Exception as e:
-            err=sys.exc_info()[0].__name__, os.path.basename(sys.exc_info()[2].tb_frame.f_code.co_filename), sys.exc_info()[2].tb_lineno
-            error_type = e.__class__.__name__    # e.g., "NameError", "AttributeError"
-            error_msg  = str(e)                   # e.g., "name 'some_var' is not defined"
-            # Log or display exactly what you want
-            logger.error("%s: %s", error_type, error_msg)
+                logger.error ("Error in inital detect/refresh: "+str(err))
+                try:
+                    await client.close()
+                except:
+                    pass
+                return
 
-            logger.error ("Error in inital detect/refresh: "+str(err))
+            # set last full_refresh time
+            lastfulltime=datetime.datetime.now()
+            lastruntime=datetime.datetime.now()
+            timeoutErrors=0
+            initialise=False
+            logger.info("Starting data refresh cycle")
+
+        else:
+
             try:
-                await client.close()
-            except:
-                pass
-            return
-        # set last full_refresh time
-        lastfulltime=datetime.datetime.now()
-        lastruntime=datetime.datetime.now()
-        timeoutErrors=0
-        logger.info("Starting data refresh cycle")
-        while True:
-            try:
-                if not client.connected:
-                    #in case the client has died, reopen it
-                    logger.debug("Re-opening Modbus Connecion to: "+str(GiV_Settings.invertorIP))
-                    await client.connect()
-                # Write command and initiation to use the same client connection
+
+                timesincelast=datetime.datetime.now()-lastruntime
+                now = datetime.datetime.now(tz=GivLUT.timezone)
+                # Run resetTodayStats() once when the date changes at midnight.
+                # Use the shared marker on GivLUT so other modules reference the
+                # same state.
+                if now.hour == 0 and now.minute == 0:
+                    resetTodayStats()
+
+                # If there are writes to complete or refresh timer has elapsed open a Modbus connection
+                # else sleep 500ms and try again
+                refreshreq = timesincelast.total_seconds() > refresh_period
+                if  refreshreq or exists(GivLUT.writerequests):
+                    if not client.connected:
+                        #in case the client has died, reopen it
+                        logger.debug("Re-opening Modbus Connecion to: "+str(GiV_Settings.invertorIP))
+                        await client.connect()
+                else:
+                    await asyncio.sleep(0.5)
+                    continue
+
                 if exists(GivLUT.writerequests):
+                    # Write command and initiation to use the same client connection
                     try:
                         logger.debug("Write Request recieved")
                         with open(GivLUT.writerequests, 'rb') as inp:
@@ -166,7 +195,7 @@ async def watch_plant(
                                             outp.write(json.dumps(responses))
                                 await asyncio.sleep(0.3)        #Pause between commands for 300ms
 
-                    ## Check write file for anything more since opening and loop again
+                        ## Check write file for anything more since opening and loop again
                         with open(GivLUT.writerequests, 'rb') as inp:
                             newwritecommands= pickle.load(inp)
                         logger.debug("Write Commands lengths: "+str(len(writecommands))+" -> "+str(len(newwritecommands)))
@@ -174,7 +203,7 @@ async def watch_plant(
                             logger.debug("No new writes, removing writerequest file")
                             os.remove(GivLUT.writerequests)
                         else:
-                        #    #Loop straight back to proces smore write commands
+                            #    #Loop straight back to proces smore write commands
                             logger.debug("Looping back to mop up incoming write commands")
                             ## remove old command before looping back
                             for i in newwritecommands[:]:
@@ -188,54 +217,40 @@ async def watch_plant(
                         logger.error(str(command[0])+" request error: "+str(e)+" deleting all pending requests, please try again")
                         os.remove(GivLUT.writerequests)
 
-                timesincelast=datetime.datetime.now()-lastruntime
-                now = datetime.datetime.now(tz=GivLUT.timezone)
-                # Run resetTodayStats() once when the date changes at midnight.
-                # Use the shared marker on GivLUT so other modules reference the
-                # same state.
-                if now.hour == 0 and now.minute == 0:
-                    resetTodayStats()
-                if timesincelast.total_seconds() < refresh_period:
-                    await asyncio.sleep(0.5)
-                    #if refresh period hasn't expired then just keep looping back up to write check
-                    continue
-                if not passive:
-                    #Check time since last full_refresh
-                    timesincefull=datetime.datetime.now()-lastfulltime
-                    if timesincefull.total_seconds() > full_refresh_period or exists(".fullrefresh") or GiV_Settings.inverter_type.lower()=="gateway":      #always run full refresh for Gateway
-                        fullRefresh=True
-                        logger.debug ("Running full refresh")
-                        lastfulltime=datetime.datetime.now()
-                        if exists(".fullrefresh"):
-                            os.remove(".fullrefresh")
-                    elif now.hour == 0 and now.minute == 0:
-                        fullRefresh=True
-                        logger.debug ("Midnight so grabbing full Energy data")
-                        lastfulltime=datetime.datetime.now()
-                        if exists(".fullrefresh"):
-                            os.remove(".fullrefresh")
-                    else:
-                        fullRefresh=False
-                        logger.debug ("Running partial refresh")
+
+                if not passive and refreshreq:
+
                     try:
-                        #await client.connect()
-                        reqs = commands.refresh_plant_data(fullRefresh, client.plant.number_batteries, slave_addr=client.plant.slave_address,isHV=client.plant.isHV,additional_holding_registers=client.plant.additional_holding_registers,additional_input_registers=client.plant.additional_input_registers,meter_list=client.plant.meter_list)
-                        result= await client.execute(
-                            reqs, timeout=timeout, retries=retries, return_exceptions=True
-                        )
-                        #await client.close()
+                        reqs = commands.refresh_plant_data(True, client.plant.number_batteries, slave_addr=client.plant.slave_address,isHV=client.plant.isHV,additional_holding_registers=client.plant.additional_holding_registers,additional_input_registers=client.plant.additional_input_registers,meter_list=client.plant.meter_list)
+                        reqsSize=len(reqs)
+                        logger.debug("Number of requests = " +str(reqsSize))
+                        result=[]
+                        # Send the usual first 5 commands
+                        for req in reqs[0:5]:
+                            logger.debug("Sending refresh request")
+                            result.append(await client.send_request_and_await_response(req, timeout=timeout, retries=retries))
+
+                        # Append additional infrequent command from the requests
+                        if not additionCommandIndex < reqsSize:
+                            additionCommandIndex=5
+                        logger.debug("Adding next additional command at index " + str(additionCommandIndex))
+                        result.append(await client.send_request_and_await_response(reqs[additionCommandIndex], timeout=timeout, retries=retries))
+                        additionCommandIndex += 1
+
                         hasTimeout=False
                         for res in result:
                             if isinstance(res,TimeoutError):
                                 hasTimeout=True
                                 logger.debug("Timeout Error: "+str(res.__class__.__name__))
                                 raise Exception(res)
+
                         timeoutErrors=0     # Reset timeouts if all is good this run
                         logger.debug("Data get was successful, now running handler if needed: ")
                         lastruntime=datetime.datetime.now()
                         if exists("commsfailure_"+str(GiV_Settings.givtcp_instance)+".pkl"):
                             # Remove any failed counts if connection runs OK
                             os.remove("commsfailure_"+str(GiV_Settings.givtcp_instance)+".pkl")
+
                     except CommunicationError:
                         logger.error ("Unable to connect to inverter on: "+str(GiV_Settings.invertorIP))
                         failcount=commsFailure()
@@ -253,8 +268,8 @@ async def watch_plant(
                         if timeoutErrors>5:
                             logger.error("5 consecutive timeout errors in watch loop. Restarting modbus connection:")
                             await client.close()
-                            await asyncio.sleep(2)      #Just pause for a moment before trying to reconnect
-                            await client.connect()
+                            # await asyncio.sleep(2)      #Just pause for a moment before trying to reconnect
+                            # await client.connect()
                         continue
                     if handler:
                         try:
@@ -266,11 +281,18 @@ async def watch_plant(
                             # Log or display exactly what you want
                             logger.error("%s: %s", error_type, error_msg)
                             logger.error ("Error in calling handler: "+str(err))
+
+                    if client.connected:
+                        logger.debug("Successfully processed loop, closing Modbus Connection")
+                        await client.close()
+
             except Exception:
                 f=sys.exc_info()
                 e=sys.exc_info()[0].__name__, os.path.basename(sys.exc_info()[2].tb_frame.f_code.co_filename), sys.exc_info()[2].tb_lineno
                 logger.error ("Error in Watch Loop: "+str(e))
                 await client.close()
+
+
 
 def getInvModel(plant: Plant):
 ##### Feels like this needs reviewing and maybe moving to the device models
